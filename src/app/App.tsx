@@ -341,6 +341,27 @@ function LoginScreen({ onAuth }) {
       setError(error.message);
       return;
     }
+
+    // Ensure profile exists for user
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: existingProfile } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (!existingProfile) {
+        await supabase.from("profiles").insert({
+          id: user.id,
+          email: user.email,
+          name: user.user_metadata?.name || "",
+          phone: user.user_metadata?.phone || "",
+          role: user.user_metadata?.role || "patient",
+        }).maybeSingle();
+      }
+    }
+
     onAuth();
   };
 
@@ -376,6 +397,22 @@ function LoginScreen({ onAuth }) {
       setMode("login");
       return;
     }
+
+    // Create profile row for new user
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { error: profileError } = await supabase.from("profiles").insert({
+        id: user.id,
+        email: form.email,
+        name: form.name,
+        phone: form.phone || "",
+        role: form.role || "patient",
+      });
+      if (profileError) {
+        console.error("Error creating profile:", profileError);
+      }
+    }
+
     show("Account created successfully! Welcome to Cosmocare.");
     onAuth();
   };
@@ -1573,7 +1610,7 @@ function BloodBank({ userId, userName }) {
       .from("blood_donors")
       .select("id")
       .eq("user_id", userId)
-      .single()
+      .maybeSingle()
       .then(({ data }) => {
         if (data) setRegistered(true);
       });
@@ -2420,7 +2457,7 @@ function ProviderDashboard({ profile, onLogout }) {
       .from("providers")
       .select("*")
       .eq("user_id", profile.id)
-      .single()
+      .maybeSingle()
       .then(({ data }) => {
         setProviderData(data);
         if (data) {
@@ -3177,7 +3214,7 @@ export default function App() {
       .from("profiles")
       .select("*")
       .eq("id", userId)
-      .single();
+      .maybeSingle();
     if (data) {
       setProfile(data);
       if (data.role !== "patient") {
@@ -3185,7 +3222,7 @@ export default function App() {
           .from("providers")
           .select("id")
           .eq("user_id", userId)
-          .single();
+          .maybeSingle();
         if (!prov) setNeedsSetup(true);
       }
     }
@@ -3200,8 +3237,27 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (session) loadProfile(session.user.id);
-      else {
+      if (session) {
+        // Ensure profile exists (for email confirmation flow)
+        supabase
+          .from("profiles")
+          .select("id")
+          .eq("id", session.user.id)
+          .maybeSingle()
+          .then(({ data: existingProfile }) => {
+            if (!existingProfile) {
+              // Create profile if it doesn't exist
+              supabase.from("profiles").insert({
+                id: session.user.id,
+                email: session.user.email,
+                name: session.user.user_metadata?.name || "",
+                phone: session.user.user_metadata?.phone || "",
+                role: session.user.user_metadata?.role || "patient",
+              }).maybeSingle();
+            }
+            loadProfile(session.user.id);
+          });
+      } else {
         setProfile(null);
         setNeedsSetup(false);
       }
