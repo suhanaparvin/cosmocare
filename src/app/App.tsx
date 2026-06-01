@@ -3172,8 +3172,44 @@ export default function App() {
   const [session, setSession] = useState(undefined); // undefined = loading
   const [profile, setProfile] = useState(null);
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState(null);
+
+  const ensureProfile = async (user) => {
+    if (!user?.id) return;
+
+    const { data: existingProfile, error: checkError } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (checkError) {
+      console.error("Profile check error:", checkError);
+      return;
+    }
+
+    if (!existingProfile) {
+      const { error: insertError } = await supabase.from("profiles").insert({
+        id: user.id,
+        email: user.email,
+        name: user.user_metadata?.name || "",
+        phone: user.user_metadata?.phone || "",
+        role: user.user_metadata?.role || "patient",
+      });
+
+      if (insertError) {
+        console.error("Profile insert error:", insertError);
+      } else {
+        console.log("Created missing profile for user:", user.id);
+      }
+    }
+  };
 
   const loadProfile = async (userId) => {
+    setProfileLoading(true);
+    setProfileError(null);
+
     try {
       // Add timeout to prevent hanging
       const profilePromise = supabase
@@ -3202,10 +3238,14 @@ export default function App() {
       } else {
         console.warn("Profile not found for user:", userId);
         setProfile(null);
+        setProfileError("Profile not found");
       }
     } catch (err) {
       console.error("Error loading profile:", err);
       setProfile(null);
+      setProfileError(err.message || "Profile load failed");
+    } finally {
+      setProfileLoading(false);
     }
   };
 
@@ -3213,58 +3253,54 @@ export default function App() {
     let isMounted = true;
     let timeout;
 
-    // Set up auth listener FIRST
+    const processSession = async (session) => {
+      if (!isMounted) return;
+      clearTimeout(timeout);
+
+      setSession(session);
+      if (!session) {
+        setProfile(null);
+        setNeedsSetup(false);
+        return;
+      }
+
+      try {
+        await ensureProfile(session.user);
+        await loadProfile(session.user.id);
+      } catch (err) {
+        console.error("Session processing error:", err);
+        setProfile(null);
+        setProfileError(err.message || "Could not load profile");
+      }
+    };
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (_event, session) => {
         if (!isMounted) return;
-        
         clearTimeout(timeout);
         console.log("Auth state changed:", _event, !!session);
-        
-        setSession(session);
-        
-        if (session) {
-          try {
-            await loadProfile(session.user.id);
-          } catch (err) {
-            console.error("Error loading profile:", err);
-            setProfile(null);
-          }
-        } else {
-          setProfile(null);
-          setNeedsSetup(false);
-        }
+        await processSession(session);
       }
     );
 
-    // Then get initial session with timeout
     const getInitialSession = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        
         if (!isMounted) return;
-        
         console.log("Initial session:", !!session);
-        
-        if (!session) {
-          // Explicitly set to null if no session
-          setSession(null);
-          setProfile(null);
-        }
-        // If there IS a session, the listener will handle it
+        await processSession(session);
       } catch (err) {
         console.error("Error getting initial session:", err);
         if (isMounted) {
-          // Fail safely to login screen
           setSession(null);
           setProfile(null);
+          setProfileError(err.message || "Session init failed");
         }
       }
     };
 
     getInitialSession();
 
-    // Timeout after 5 seconds if still loading
     timeout = setTimeout(() => {
       if (isMounted && session === undefined) {
         console.warn("Auth load timeout, showing login screen");
@@ -3320,7 +3356,7 @@ export default function App() {
       </>
     );
 
-  if (!profile)
+  if (session && profileLoading)
     return (
       <div
         style={{
@@ -3341,6 +3377,51 @@ export default function App() {
           }}
         />
         <style>{`@keyframes spin { to { transform: rotate(360deg); } } * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui; }`}</style>
+      </div>
+    );
+
+  if (session && !profile)
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 24,
+          textAlign: "center",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              marginBottom: 16,
+              fontSize: 18,
+              fontWeight: 700,
+              color: "#1e293b",
+            }}
+          >
+            Setting up your account...
+          </div>
+          <div style={{ marginBottom: 20, color: "#475569" }}>
+            {profileError
+              ? `Unable to load your profile: ${profileError}`
+              : "Your account is being initialized. If this takes too long, please sign out and sign back in."}
+          </div>
+          <button
+            onClick={handleLogout}
+            style={{
+              padding: "10px 18px",
+              background: "#2563eb",
+              color: "#fff",
+              border: "none",
+              borderRadius: 10,
+              cursor: "pointer",
+            }}
+          >
+            Sign Out
+          </button>
+        </div>
       </div>
     );
 
