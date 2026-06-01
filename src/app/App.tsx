@@ -3210,59 +3210,89 @@ export default function App() {
   const [needsSetup, setNeedsSetup] = useState(false);
 
   const loadProfile = async (userId) => {
-    const { data } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .maybeSingle();
-    if (data) {
-      setProfile(data);
-      if (data.role !== "patient") {
-        const { data: prov } = await supabase
-          .from("providers")
-          .select("id")
-          .eq("user_id", userId)
-          .maybeSingle();
-        if (!prov) setNeedsSetup(true);
+    try {
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", userId)
+        .maybeSingle();
+      if (data) {
+        setProfile(data);
+        if (data.role !== "patient") {
+          const { data: prov } = await supabase
+            .from("providers")
+            .select("id")
+            .eq("user_id", userId)
+            .maybeSingle();
+          if (!prov) setNeedsSetup(true);
+        }
+      } else {
+        setProfile(null);
       }
+    } catch (err) {
+      console.error("Error loading profile:", err);
+      setProfile(null);
     }
   };
 
   useEffect(() => {
+    let isMounted = true;
+
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!isMounted) return;
       setSession(session);
       if (session) loadProfile(session.user.id);
     });
+
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!isMounted) return;
       setSession(session);
       if (session) {
-        // Ensure profile exists (for email confirmation flow)
-        supabase
-          .from("profiles")
-          .select("id")
-          .eq("id", session.user.id)
-          .maybeSingle()
-          .then(({ data: existingProfile }) => {
-            if (!existingProfile) {
-              // Create profile if it doesn't exist
-              supabase.from("profiles").insert({
+        try {
+          // Check if profile exists
+          const { data: existingProfile, error: checkError } = await supabase
+            .from("profiles")
+            .select("id")
+            .eq("id", session.user.id)
+            .maybeSingle();
+
+          // If profile doesn't exist, create it once
+          if (!existingProfile && !checkError) {
+            const { error: insertError } = await supabase
+              .from("profiles")
+              .insert({
                 id: session.user.id,
                 email: session.user.email,
                 name: session.user.user_metadata?.name || "",
                 phone: session.user.user_metadata?.phone || "",
                 role: session.user.user_metadata?.role || "patient",
-              }).maybeSingle();
+              })
+              .maybeSingle();
+
+            if (insertError) {
+              console.error("Profile creation error:", insertError);
             }
-            loadProfile(session.user.id);
-          });
+          }
+
+          // Load the profile
+          if (isMounted) {
+            await loadProfile(session.user.id);
+          }
+        } catch (err) {
+          console.error("Auth state change error:", err);
+        }
       } else {
         setProfile(null);
         setNeedsSetup(false);
       }
     });
-    return () => subscription.unsubscribe();
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const handleLogout = () => supabase.auth.signOut();
