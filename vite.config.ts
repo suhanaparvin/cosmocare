@@ -16,4 +16,9 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  server: {
+    headers: {
+      'Permissions-Policy': 'geolocation=(), microphone=(), camera=(), payment=()',
+    },
+  },
 })
