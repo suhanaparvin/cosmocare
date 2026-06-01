@@ -3175,11 +3175,20 @@ export default function App() {
 
   const loadProfile = async (userId) => {
     try {
-      const { data } = await supabase
+      // Add timeout to prevent hanging
+      const profilePromise = supabase
         .from("profiles")
         .select("*")
         .eq("id", userId)
         .maybeSingle();
+
+      // Wrap with timeout
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Profile load timeout")), 3000)
+      );
+
+      const { data } = await Promise.race([profilePromise, timeoutPromise]);
+
       if (data) {
         setProfile(data);
         if (data.role !== "patient") {
@@ -3202,31 +3211,25 @@ export default function App() {
 
   useEffect(() => {
     let isMounted = true;
-    let unsubscribe;
+    let timeout;
 
-    const initAuth = async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (isMounted) {
-          setSession(session);
-          if (session) {
-            await loadProfile(session.user.id);
-          }
-        }
-      } catch (err) {
-        console.error("Error getting session:", err);
-      }
-    };
-
-    initAuth();
-
+    // Set up auth listener FIRST
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (_event, session) => {
         if (!isMounted) return;
         
+        clearTimeout(timeout);
+        console.log("Auth state changed:", _event, !!session);
+        
         setSession(session);
+        
         if (session) {
-          await loadProfile(session.user.id);
+          try {
+            await loadProfile(session.user.id);
+          } catch (err) {
+            console.error("Error loading profile:", err);
+            setProfile(null);
+          }
         } else {
           setProfile(null);
           setNeedsSetup(false);
@@ -3234,11 +3237,45 @@ export default function App() {
       }
     );
 
-    unsubscribe = subscription?.unsubscribe;
+    // Then get initial session with timeout
+    const getInitialSession = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (!isMounted) return;
+        
+        console.log("Initial session:", !!session);
+        
+        if (!session) {
+          // Explicitly set to null if no session
+          setSession(null);
+          setProfile(null);
+        }
+        // If there IS a session, the listener will handle it
+      } catch (err) {
+        console.error("Error getting initial session:", err);
+        if (isMounted) {
+          // Fail safely to login screen
+          setSession(null);
+          setProfile(null);
+        }
+      }
+    };
+
+    getInitialSession();
+
+    // Timeout after 5 seconds if still loading
+    timeout = setTimeout(() => {
+      if (isMounted && session === undefined) {
+        console.warn("Auth load timeout, showing login screen");
+        setSession(null);
+      }
+    }, 5000);
 
     return () => {
       isMounted = false;
-      if (unsubscribe) unsubscribe();
+      clearTimeout(timeout);
+      if (subscription) subscription.unsubscribe();
     };
   }, []);
 
