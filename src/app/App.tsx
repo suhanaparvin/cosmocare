@@ -352,33 +352,32 @@ function LoginScreen({ onAuth }) {
       setLoading(false);
       return;
     }
-    const { error } = await supabase.auth.signUp({
+
+    const { data, error } = await supabase.auth.signUp({
       email: form.email,
       password: form.password,
       options: {
+        emailRedirectTo: window.location.origin,
         data: { name: form.name, role: form.role, phone: form.phone },
       },
     });
+
     setLoading(false);
     if (error) {
       setError(error.message);
       return;
     }
-    // Automatically sign in the user after successful signup
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: form.email,
-      password: form.password,
-    });
-    if (signInError) {
-      setError(
-        "Account created but sign in failed. Please try logging in manually.",
-      );
-      setMode("login");
+
+    if (data?.session) {
+      show("Account created successfully! Welcome to Cosmocare.");
+      onAuth();
       return;
     }
 
-    show("Account created successfully! Welcome to Cosmocare.");
-    onAuth();
+    show(
+      "Signup succeeded. Please verify your email using the link we sent.",
+    );
+    setMode("login");
   };
 
   return (
@@ -3169,11 +3168,22 @@ function PatientDashboard({ profile, onLogout }) {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [session, setSession] = useState(undefined); // undefined = loading
+  const [session, setSession] = useState(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const [profile, setProfile] = useState(null);
-  const [needsSetup, setNeedsSetup] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
-  const [profileError, setProfileError] = useState(null);
+  const [profileError, setProfileError] = useState("");
+  const [needsSetup, setNeedsSetup] = useState(false);
+
+  const mounted = useRef(true);
+  const authTimeout = useRef(null);
+
+  const clearAuthTimeout = () => {
+    if (authTimeout.current) {
+      clearTimeout(authTimeout.current);
+      authTimeout.current = null;
+    }
+  };
 
   const ensureProfile = async (user) => {
     if (!user?.id) return;
@@ -3208,19 +3218,17 @@ export default function App() {
 
   const loadProfile = async (userId) => {
     setProfileLoading(true);
-    setProfileError(null);
+    setProfileError("");
 
     try {
-      // Add timeout to prevent hanging
       const profilePromise = supabase
         .from("profiles")
         .select("*")
         .eq("id", userId)
         .maybeSingle();
 
-      // Wrap with timeout
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Profile load timeout")), 3000)
+        setTimeout(() => reject(new Error("Profile load timeout")), 5000)
       );
 
       const { data } = await Promise.race([profilePromise, timeoutPromise]);
@@ -3249,75 +3257,109 @@ export default function App() {
     }
   };
 
+  const processSession = async (sessionValue) => {
+    if (!mounted.current) return;
+    clearAuthTimeout();
+
+    setSession(sessionValue);
+
+    if (!sessionValue) {
+      setProfile(null);
+      setNeedsSetup(false);
+      setProfileError("");
+      setProfileLoading(false);
+      setSessionLoading(false);
+      return;
+    }
+
+    try {
+      await ensureProfile(sessionValue.user);
+      await loadProfile(sessionValue.user.id);
+    } catch (err) {
+      console.error("Session processing error:", err);
+      setProfile(null);
+      setProfileError(err.message || "Could not load profile");
+    } finally {
+      if (mounted.current) {
+        setSessionLoading(false);
+      }
+    }
+  };
+
   useEffect(() => {
-    let isMounted = true;
-    let timeout;
-
-    const processSession = async (session) => {
-      if (!isMounted) return;
-      clearTimeout(timeout);
-
-      setSession(session);
-      if (!session) {
-        setProfile(null);
-        setNeedsSetup(false);
-        return;
-      }
-
-      try {
-        await ensureProfile(session.user);
-        await loadProfile(session.user.id);
-      } catch (err) {
-        console.error("Session processing error:", err);
-        setProfile(null);
-        setProfileError(err.message || "Could not load profile");
-      }
-    };
+    mounted.current = true;
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (!isMounted) return;
-        clearTimeout(timeout);
-        console.log("Auth state changed:", _event, !!session);
-        await processSession(session);
+      async (_event, sessionValue) => {
+        if (!mounted.current) return;
+        clearAuthTimeout();
+        console.log("Auth state changed:", _event, !!sessionValue);
+        await processSession(sessionValue);
+
+        if (window.location.href.includes("access_token") || window.location.href.includes("refresh_token")) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
       }
     );
 
-    const getInitialSession = async () => {
+    const initializeAuth = async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!isMounted) return;
-        console.log("Initial session:", !!session);
-        await processSession(session);
+        if (
+          window.location.href.includes("access_token") ||
+          window.location.href.includes("refresh_token") ||
+          window.location.href.includes("type=signup") ||
+          window.location.href.includes("type=magiclink")
+        ) {
+          const { data, error } = await supabase.auth.getSessionFromUrl({
+            storeSession: true,
+          });
+          if (error) {
+            console.warn("getSessionFromUrl warning:", error.message);
+          } else {
+            await processSession(data?.session || null);
+          }
+        }
+
+        const { data: { session: existingSession } } = await supabase.auth.getSession();
+        await processSession(existingSession);
       } catch (err) {
-        console.error("Error getting initial session:", err);
-        if (isMounted) {
+        console.error("Error initializing auth:", err);
+        if (mounted.current) {
           setSession(null);
           setProfile(null);
-          setProfileError(err.message || "Session init failed");
+          setProfileError(err.message || "Auth initialization failed");
+          setSessionLoading(false);
+          setProfileLoading(false);
         }
       }
     };
 
-    getInitialSession();
+    initializeAuth();
 
-    timeout = setTimeout(() => {
-      if (isMounted && session === undefined) {
-        console.warn("Auth load timeout, showing login screen");
+    authTimeout.current = setTimeout(() => {
+      if (mounted.current && sessionLoading) {
+        console.warn("Auth initialization timed out");
         setSession(null);
+        setSessionLoading(false);
       }
-    }, 5000);
+    }, 7000);
 
     return () => {
-      isMounted = false;
-      clearTimeout(timeout);
+      mounted.current = false;
+      clearAuthTimeout();
       if (subscription) subscription.unsubscribe();
     };
   }, []);
 
-  const handleLogout = () => supabase.auth.signOut();
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setProfile(null);
+    setNeedsSetup(false);
+    setProfileError("");
+  };
 
-  if (session === undefined)
+  if (sessionLoading)
     return (
       <div
         style={{
