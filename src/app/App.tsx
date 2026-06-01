@@ -341,27 +341,6 @@ function LoginScreen({ onAuth }) {
       setError(error.message);
       return;
     }
-
-    // Ensure profile exists for user
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const { data: existingProfile } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (!existingProfile) {
-        await supabase.from("profiles").insert({
-          id: user.id,
-          email: user.email,
-          name: user.user_metadata?.name || "",
-          phone: user.user_metadata?.phone || "",
-          role: user.user_metadata?.role || "patient",
-        }).maybeSingle();
-      }
-    }
-
     onAuth();
   };
 
@@ -396,21 +375,6 @@ function LoginScreen({ onAuth }) {
       );
       setMode("login");
       return;
-    }
-
-    // Create profile row for new user
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const { error: profileError } = await supabase.from("profiles").insert({
-        id: user.id,
-        email: form.email,
-        name: form.name,
-        phone: form.phone || "",
-        role: form.role || "patient",
-      });
-      if (profileError) {
-        console.error("Error creating profile:", profileError);
-      }
     }
 
     show("Account created successfully! Welcome to Cosmocare.");
@@ -3227,6 +3191,7 @@ export default function App() {
           if (!prov) setNeedsSetup(true);
         }
       } else {
+        console.warn("Profile not found for user:", userId);
         setProfile(null);
       }
     } catch (err) {
@@ -3237,61 +3202,43 @@ export default function App() {
 
   useEffect(() => {
     let isMounted = true;
+    let unsubscribe;
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!isMounted) return;
-      setSession(session);
-      if (session) loadProfile(session.user.id);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (!isMounted) return;
-      setSession(session);
-      if (session) {
-        try {
-          // Check if profile exists
-          const { data: existingProfile, error: checkError } = await supabase
-            .from("profiles")
-            .select("id")
-            .eq("id", session.user.id)
-            .maybeSingle();
-
-          // If profile doesn't exist, create it once
-          if (!existingProfile && !checkError) {
-            const { error: insertError } = await supabase
-              .from("profiles")
-              .insert({
-                id: session.user.id,
-                email: session.user.email,
-                name: session.user.user_metadata?.name || "",
-                phone: session.user.user_metadata?.phone || "",
-                role: session.user.user_metadata?.role || "patient",
-              })
-              .maybeSingle();
-
-            if (insertError) {
-              console.error("Profile creation error:", insertError);
-            }
-          }
-
-          // Load the profile
-          if (isMounted) {
+    const initAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (isMounted) {
+          setSession(session);
+          if (session) {
             await loadProfile(session.user.id);
           }
-        } catch (err) {
-          console.error("Auth state change error:", err);
         }
-      } else {
-        setProfile(null);
-        setNeedsSetup(false);
+      } catch (err) {
+        console.error("Error getting session:", err);
       }
-    });
+    };
+
+    initAuth();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (!isMounted) return;
+        
+        setSession(session);
+        if (session) {
+          await loadProfile(session.user.id);
+        } else {
+          setProfile(null);
+          setNeedsSetup(false);
+        }
+      }
+    );
+
+    unsubscribe = subscription?.unsubscribe;
 
     return () => {
       isMounted = false;
-      subscription.unsubscribe();
+      if (unsubscribe) unsubscribe();
     };
   }, []);
 
