@@ -3294,7 +3294,13 @@ export default function App() {
         if (!mounted.current) return;
         clearAuthTimeout();
         console.log("Auth state changed:", _event, !!sessionValue);
-        await processSession(sessionValue);
+        try {
+          await processSession(sessionValue);
+        } catch (err) {
+          console.error('Error handling auth state change:', err);
+        } finally {
+          if (mounted.current) setSessionLoading(false);
+        }
 
         if (window.location.href.includes("access_token") || window.location.href.includes("refresh_token")) {
           window.history.replaceState({}, document.title, window.location.pathname);
@@ -3331,6 +3337,8 @@ export default function App() {
           setSessionLoading(false);
           setProfileLoading(false);
         }
+      } finally {
+        if (mounted.current) setSessionLoading(false);
       }
     };
 
